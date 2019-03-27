@@ -1,0 +1,149 @@
+int motorPinA = 9; // motor pin representing A side of H-Bridge
+int motorPinB = 10; // motor pin represents B side of H-bridge
+
+float val = 0; //Variable used for user input by angle
+float ticks = 0; // Number of times encoder interrups from IR signal
+float feedback = 0; // P controller feedback
+
+const int enc_pinA = A4; // interruption pin A
+const int enc_pinB = A5; // interruption pin B
+
+enum states{S0, S1, S2, S3}; // four states based off the truth table of IR sensors
+states CS, PS; // current state and previous state to represent which sinusoid we are following
+
+int SinA = 0; //Binary values for sinusoid A
+int SinB = 0; //Binary values for sinusoid B
+
+float dir = 0;
+float ticksNeeded = 0;
+
+void setup() {
+Serial.begin(9600);
+pinMode(enc_pinA, INPUT_PULLUP);
+pinMode(enc_pinB, INPUT_PULLUP);
+attachInterrupt(digitalPinToInterrupt(enc_pinA), countTicks, RISING);
+attachInterrupt(digitalPinToInterrupt(enc_pinA), countTicks, FALLING);
+attachInterrupt(digitalPinToInterrupt(enc_pinB), countTicks, CHANGE);
+attachInterrupt(digitalPinToInterrupt(enc_pinB), countTicks, FALLING);
+}
+
+void moveIt(float val){
+  ticksNeeded = val * 0.833333;
+  if(val > 0){
+    while(ticksNeeded > ticks){
+      motorFord();
+    }
+    motorBrake();
+    if(ticks > ticksNeeded){
+      feedback = ticks - ticksNeeded;
+      ticks = 0;
+      while(feedback > ticks){
+        motorBack();
+      }
+      motorBrake();
+    }
+  }
+  else
+  if(val < 0){
+    ticksNeeded = val * -0.833333;
+    while(ticksNeeded > ticks){
+      motorBack();
+    }
+    motorBrake();
+    if(ticks > ticksNeeded){
+      feedback = ticks - ticksNeeded;
+      ticks = 0;
+      while(feedback > ticks){
+        motorFord();
+      }
+      motorBrake();
+    }
+  } 
+  
+
+}
+
+void loop() {
+  while(Serial.available()){
+    val = Serial.parseFloat();
+    moveIt(val);
+  }
+ ticks = 0;
+ feedback = 0;
+}
+
+void countTicks(){
+  ticks++;
+
+  SinA = digitalRead(enc_pinA);
+  SinB = digitalRead(enc_pinB);
+
+  if(SinA == 0 && SinB == 0){
+    PS = CS;
+    CS = S0; // 00 equals current state 0
+  }
+  if(SinA == 0 && SinB == 1){
+    PS = CS;
+    CS = S1; // 01 equals current state 1
+  }
+  if(SinA == 1 && SinB == 0){
+    PS = CS;
+    CS = S2; // 10 equals current state 2
+  }
+  if(SinA == 1 && SinB == 1){
+    PS = CS;
+    CS = S3; // 11 equals current state 3
+  }
+}
+
+void getDirection(){
+  switch(CS){
+    case S0:
+    if(PS = S1)
+      dir = 0.833333;
+    else
+    if(PS = S2)
+      dir = -0.833333;
+    break;
+    case S1:
+    if(PS = S3)
+      dir = 0.833333;
+    else
+    if(PS = S0)
+      dir = -0.833333;
+    break;
+    case S2:
+    if(PS = S0)
+      dir = 0.833333;
+    else
+    if(PS = S3)
+      dir = -0.833333;
+    break;
+    case S3:
+    if(PS = S2)
+      dir = 0.833333;
+    else
+    if(PS = S1)
+      dir = -0.833333;
+    break;
+    default:
+      dir = 0;
+  }
+}
+
+void motorFord(){
+  analogWrite(motorPinA, 110);
+  analogWrite(motorPinB, 0);
+  //Serial.println("Forward");
+}
+
+void motorBack(){
+  analogWrite(motorPinB, 110);
+  analogWrite(motorPinA, 0);
+ // Serial.println("Backward");
+}
+
+void motorBrake(){
+  analogWrite(motorPinA, 0);
+  analogWrite(motorPinB, 0);
+}
