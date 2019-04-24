@@ -1,0 +1,276 @@
+#include <SPI.h>
+#include <WiFi101.h>
+#include <WiFiUdp.h>
+
+#define motorPinA1 5 //Motor A forward Dir
+#define motorPinA2 6 // Motor A reverse Dir
+#define motorPinB1 11 // Motor B forward Dir
+#define motorPinB2 10 // Motor B reverse Dir
+//************************************************Proclamations************************************
+void countLeft();
+void countRight();
+void robotControl();
+void Drive();
+void printWiFiStatus();
+
+//*******************************************************************WiFi Setup****************************************************************
+void printWiFiStatus();
+
+int status = WL_IDLE_STATUS;
+///////please enter your sensitive data in the Secret tab/arduino_secrets.h
+char ssid[] = "Feathering";        // your network SSID (name)
+char pass[] = "Sweetunicorn281";    // your network password (use for WPA, or use as key for WEP)
+int keyIndex = 0;            // your network key Index number (needed only for WEP)
+
+unsigned int localPort = 2390;      // local port to listen on
+
+char packetBuffer[255]; //buffer to hold incoming packet
+char  ReplyBuffer[] = "acknowledged";       // a string to send back
+
+WiFiUDP Udp;
+
+//*****************************************************Int Pins*************************************
+
+const int enc_pinL = 12; // encoder pin L
+const int enc_pinR = 13; // encoder Pin R
+
+//**********************************************Odometry****************************************
+float len = 112;
+float q = 1.155756;
+float phi = 0.0103192;
+double Trans[4][4] = {{1, 0, 0, 0},
+                      {0, 1, 0, 0}, 
+                      {0, 0, 1, 0}, 
+                      {0, 0, 0, 1}
+}; // Idenity Matrix
+double angle = acos(Trans[1][1]);
+int xPos = Trans[1][4]; // x position from odemtry
+int yPos = Trans[2][4]; // y position from odemtry
+//**********************************************Configurations********************************
+const int wheel_d = 56; //wheel diameter equals 56 w/Orings mm
+const float wheel_c = PI * wheel_d; // wheel circumfrence 
+const int counts_per_rev = 156;
+
+int val = 0; // user input
+
+volatile unsigned long enc_l = 0;
+volatile unsigned long enc_r = 0;
+
+unsigned long ticks = 0;
+int changeSpeed = 0;
+int lmotorSpeed = 75;
+int rmotorSpeed = 75;
+
+void setup() {
+  //**********************************************************************************************WiFi Setup**********************************************************
+   WiFi.setPins(8,7,4,2);
+  //Initialize serial and wait for port to open:
+  Serial.begin(9600);
+  while (!Serial) {
+    ; // wait for serial port to connect. Needed for native USB port only
+  }
+
+  // check for the presence of the shield:
+  if (WiFi.status() == WL_NO_SHIELD) {
+    Serial.println("WiFi shield not present");
+    // don't continue:
+    while (true);
+  }
+
+  // attempt to connect to WiFi network:
+  while ( status != WL_CONNECTED) {
+    Serial.print("Attempting to connect to SSID: ");
+    Serial.println(ssid);
+    // Connect to WPA/WPA2 network. Change this line if using open or WEP network:
+    status = WiFi.begin(ssid, pass);
+
+    // wait 10 seconds for connection:
+    delay(10000);
+  }
+  Serial.println("Connected to wifi");
+  printWiFiStatus();
+
+  Serial.println("\nStarting connection to server...");
+  // if you get a connection, report back via serial:
+  Udp.begin(localPort);
+
+ //********************************************************initial Setup*******************************
+
+  pinMode(enc_pinL, INPUT_PULLUP);
+  pinMode(enc_pinR, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(enc_pinL), countLeft, RISING);
+  attachInterrupt(digitalPinToInterrupt(enc_pinR), countLeft, RISING);
+
+}
+
+void loop() {
+  //*****************************************************************************WiFi Setup******************************************************************************
+ // if there's data available, read a packet
+   // if there's data available, read a packet
+  int packetSize = Udp.parsePacket();
+  if (packetSize)
+  {
+    Serial.print("Received packet of size ");
+    Serial.println(packetSize);
+    Serial.print("From ");
+    IPAddress remoteIp = Udp.remoteIP();
+    Serial.print(remoteIp);
+    Serial.print(", port ");
+    Serial.println(Udp.remotePort());
+
+    // read the packet into packetBufffer
+    int len = Udp.read(packetBuffer, 255);
+    if (len > 0) packetBuffer[len] = 0;
+    Serial.println("Contents:");
+    Serial.println(packetBuffer);
+
+    // send a reply, to the IP address and port that sent us the packet we received
+    Udp.beginPacket(Udp.remoteIP(), Udp.remotePort());
+    Udp.write(ReplyBuffer);
+    Udp.endPacket();
+  }
+  }
+//  while(Serial.available()){
+//    val = Serial.parseInt();
+//    robotControl();
+//    Drive();
+//  }
+//}
+
+//void robotControl(char userInput){
+ 
+void robotControl(){
+  
+  switch(val){
+    case 1://'u': //Press the up arrow to start or go faster
+          if(changeSpeed == 0){
+             lmotorSpeed = 75;
+             rmotorSpeed = 75;
+             changeSpeed++;
+            }
+          else{
+              lmotorSpeed = lmotorSpeed + 10;
+              rmotorSpeed = rmotorSpeed + 10;
+               changeSpeed++;
+              }
+          break;
+    case 2://'d': //Press the down arrow stop or slow down
+          if(changeSpeed == 0){
+             lmotorSpeed = 0;
+             rmotorSpeed = 0;
+          }
+          else{
+            lmotorSpeed = lmotorSpeed - 10;
+            rmotorSpeed = rmotorSpeed - 10;
+            changeSpeed--;
+          }
+          break;
+    case 3://'l': // Left arrow key veer left
+          lmotorSpeed -= 2;
+          rmotorSpeed += 2;
+          break;
+    case 4://'r': // right arrow veer right
+          rmotorSpeed -=2;
+          rmotorSpeed +=2;
+          break;
+    case 5://'b': //braking
+          lmotorSpeed = 0;
+          rmotorSpeed = 0;
+          changeSpeed = 0;
+  }
+}
+
+void Drive(){
+  analogWrite(motorPinA1, rmotorSpeed); //Right Wheel Forward
+  analogWrite(motorPinA2, 0); //Right Wheel Backwards
+  analogWrite(motorPinB1, lmotorSpeed); //Left Wheel Forward
+  analogWrite(motorPinB2, 0); //Left Wheel Backward
+}
+
+void countLeft(){
+  enc_l++;
+}
+void countRight(){
+  enc_r++;
+}
+
+void TransR(){
+  double disrx = len*sin(phi);
+  double disry = len*cos(phi);
+
+  double rrot[4][4] = {{cos(phi), -sin(phi), 0, 0},
+                        {sin(phi), cos(phi), 0, 0},
+                        {0, 0, 1, 0},
+                        {0, 0, 0, 1}
+  };
+  
+  double rPos[4][4] = {{1, 0, 0, disrx},
+                       {0, 1, 0, disry},
+                       {0, 0, 1, 0},
+                       {0, 0, 0, 1}
+  };
+
+  double transR[4][4];
+  MatrixMultiple(rrot, rPos, transR);
+  double tempTrans[4][4];
+  MatrixMultiple(Trans, transR, tempTrans);
+  Trans[4][4] = tempTrans[4][4];
+//  angle = acos(Trans[1][1]);
+//  xPos = Trans[1][4];
+//  yPos = Trans[2][4];
+}
+
+void TransL(){
+  double dislx = -len*sin(-phi);
+  double disly = -len*cos(-phi);
+
+  double lrot[4][4] = {{cos(-phi), -sin(-phi), 0, 0},
+                        {sin(-phi), cos(-phi), 0, 0},
+                        {0, 0, 1, 0},
+                        {0, 0, 0, 1}
+  };
+  
+  double lPos[4][4] = {{1, 0, 0, dislx},
+                       {0, 1, 0, disly},
+                       {0, 0, 1, 0},
+                       {0, 0, 0, 1}
+  };
+
+  double transL[4][4];
+  MatrixMultiple(lrot, lPos, transL);
+  double tempTrans[4][4];
+  MatrixMultiple(Trans, transL, tempTrans);
+  Trans[4][4] = tempTrans[4][4];
+//  angle = acos(Trans[1][1]);
+//  xPos = Trans[1][4];
+//  yPos = Trans[2][4];
+}
+
+void MatrixMultiple(double mat1[4][4], double mat2[4][4], double res[4][4]){
+  int i, j, k;
+  for(i = 0; i < 4; i++){
+    for(j = 0; j < 4; j++){
+      res[i][j] = 0;
+      for(k = 0; k < 4; k++){
+        res[i][j] += mat1[i][k]*mat2[k][j];
+      }
+    }
+  }
+}
+
+void printWiFiStatus() {
+  // print the SSID of the network you're attached to:
+  Serial.print("SSID: ");
+  Serial.println(WiFi.SSID());
+
+  // print your WiFi shield's IP address:
+  IPAddress ip = WiFi.localIP();
+  Serial.print("IP Address: ");
+  Serial.println(ip);
+
+  // print the received signal strength:
+  long rssi = WiFi.RSSI();
+  Serial.print("signal strength (RSSI):");
+  Serial.print(rssi);
+  Serial.println(" dBm");
+}
