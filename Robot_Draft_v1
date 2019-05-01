@@ -1,11 +1,21 @@
+/** Written by Andre Griggs @ GMU for ECE370 2019 Spring. Overall code controls robot wirelessly using Microcontroller hooker up to phone network in conjunction with raspi
+ *  float len = 112; the axel length
+ *  float q = 1.155756; distance of each tick
+ *  float phi = 0.0103192; the rotation matric angle per tick
+ */
 #include <SPI.h>
 #include <WiFi101.h>
 #include <WiFiUdp.h>
+#include <Wire.h>
+#include <LSM303.h>
 
 #define motorPinA1 5 //Motor A forward Dir
 #define motorPinA2 6 // Motor A reverse Dir
 #define motorPinB1 11 // Motor B forward Dir
 #define motorPinB2 10 // Motor B reverse Dir
+
+LSM303 compass;
+
 //************************************************Prototypes************************************
 void countLeft();
 void countRight();
@@ -18,60 +28,85 @@ void printWiFiStatus();
 
 int status = WL_IDLE_STATUS;
 ///////please enter your sensitive data in the Secret tab/arduino_secrets.h
-char ssid[] = "Feathering";        // your network SSID (name)
-char pass[] = "Sweetunicorn281";    // your network password (use for WPA, or use as key for WEP)
+char ssid[] = "G-Riggs";        // your network SSID (name)
+char pass[] = "prop8959men6364joy";    // your network password (use for WPA, or use as key for WEP)
 int keyIndex = 0;            // your network key Index number (needed only for WEP)
 
 unsigned int localPort = 2390;      // local port to listen on
 
 char packetBuffer[255]; //buffer to hold incoming packet
+char sendBuffer[255]; // buffer to hold out going packet
 char  ReplyBuffer[] = "acknowledged";       // a string to send back
 
 WiFiUDP Udp;
 
 //*****************************************************Int Pins*************************************
 
-const int enc_pinL = 12; // encoder pin L
-const int enc_pinR = 13; // encoder Pin R
+const int enc_pinL = A5; // encoder pin L
+const int enc_pinR = A3; // encoder Pin R
 
 //**********************************************Odometry****************************************
 struct Robot{
-	int velocity;
-	float angle;
-	int rMotor;
-	int lMotor;
-	float phi;
-	float len;
-	int changeSpeed;
-	float dist;
+  int velocity;
+  float angle;
+  int rMotor;
+  int lMotor;
+  float phi;
+  float len;
+  int changeSpeed;
+  float dist;
+  int rrMotor;
+  int lrMotor;
 };
 
-//float len = 112;
-//float q = 1.155756;
-//float phi = 0.0103192;
+struct Robot bonFire = {0, 0, 30, 35, 0.0103192, 112, 0, 1.155756, 0, 0};
+Robot *Input; // sperate struct pointer that takes input from raspi via UDP and sends it to bonFire struct
+
+struct RobotFeed{
+  int vel;
+  float phi;
+  int changeSpeed;
+};
+
+RobotFeed *InfoOut; // Output pointer to write back to pi
+
+double dislx = -bonFire.len*sin(-bonFire.phi);
+double disly = -bonFire.len*cos(-bonFire.phi);
+double disrx = bonFire.len*sin(bonFire.phi);
+double disry = bonFire.len*cos(bonFire.phi);
 double Trans[4][4] = {{1, 0, 0, 0},
                       {0, 1, 0, 0},
                       {0, 0, 1, 0},
                       {0, 0, 0, 1}
 }; // Idenity Matrix
+
+double TransL[4][4] = {{cos(-bonFire.phi), -sin(-bonFire.phi), 0, -dislx},
+                        {sin(-bonFire.phi), cos(-bonFire.phi), 0, -disly},
+                        {0, 0, 1, 0},
+                        {0, 0, 0, 1}
+  };
+
+double TransR[4][4] = {{cos(bonFire.phi), -sin(bonFire.phi), 0, disrx},
+                        {sin(bonFire.phi), cos(bonFire.phi), 0, disry},
+                        {0, 0, 1, 0},
+                        {0, 0, 0, 1}
+  };
+
 //double angle = acos(Trans[1][1]);
-float xPos = Trans[1][4]; // x position from odemtry
-float yPos = Trans[2][4]; // y position from odemtry
+float xPos = Trans[0][3]; // x position from odemtry
+float yPos = Trans[1][3]; // y position from odemtry
 //**********************************************Configurations********************************
 const int wheel_d = 56; //wheel diameter equals 56 w/Orings mm
 const float wheel_c = PI * wheel_d; // wheel circumfrence
-const int counts_per_rev = 156;
+const int counts_per_rev = 156; // how many ticks to make a full revolution
 
-int val = 0; // user input
+unsigned long enc_l = 0;
+unsigned long enc_r = 0;
+volatile unsigned long ticks = enc_l + enc_r;
 
-volatile unsigned long enc_l = 0;
-volatile unsigned long enc_r = 0;
+float heading = 0;
 
-unsigned long ticks = 0;
-//int changeSpeed = 0;
-//int lmotorSpeed = 75;
-//int rmotorSpeed = 75;
-
+char report[80]; // for printing report back to serial console or raspi
 void setup() {
   //**************************************************WiFi Setup**********************************************************
    WiFi.setPins(8,7,4,2);
@@ -106,16 +141,17 @@ void setup() {
   Udp.begin(localPort);
 
  //********************************************************initial Setup*******************************
-
   pinMode(enc_pinL, INPUT_PULLUP);
   pinMode(enc_pinR, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(enc_pinL), countLeft, RISING);
-  attachInterrupt(digitalPinToInterrupt(enc_pinR), countLeft, RISING);
-
-struct Robot bonFire = {0, 0, 75, 75, 0.0103192, 112, 0, 1.155756};
-
+  attachInterrupt(digitalPinToInterrupt(enc_pinR), countRight, RISING);
+  Wire.begin();
+  compass.init();
+  compass.enableDefault();
+  compass.m_min = (LSM303::vector<int16_t>){-2982, -3293, -2805};
+  compass.m_max = (LSM303::vector<int16_t>){+4936, +3812, +5368};
 }
-
+//***************************************VOID LOOP*******************************************************
 void loop() {
   //**************************************************WiFi Setup******************************************************************************
  // if there's data available, read a packet
@@ -132,144 +168,203 @@ void loop() {
     Serial.println(Udp.remotePort());
 
     // read the packet into packetBufffer
-    int len = Udp.read(packetBuffer, 255);
+    int len = Udp.read(packetBuffer, 512);
+    Input = (Robot*)packetBuffer;
+    Udp.read( (byte*) &Input, 8);
+     //print incoming
+     Serial.println(xPos);
+     Serial.println(yPos);
+    // Serial.println(Input->velocity);
     if (len > 0) packetBuffer[len] = 0;
+
+    InfoOut = (RobotFeed*)sendBuffer;
+
+
+    InfoOut->vel = 25;
     Serial.println("Contents:");
-    Serial.println(packetBuffer);
+    Serial.println(*packetBuffer);
 
     // send a reply, to the IP address and port that sent us the packet we received
     Udp.beginPacket(Udp.remoteIP(), Udp.remotePort());
-    Udp.write(ReplyBuffer);
+    Udp.write((byte *)InfoOut, 8);
     Udp.endPacket();
   }
+  //*****************************************************************looped methods**********************************************************
+  
+  robotControl();
+  Drive();
+//  Serial.print(xPos);
+//  Serial.print(" ");
+//  Serial.println(yPos);
+//  Serial.print(" ");
+//  Serial.print(enc_l);
+//  Serial.print(" ");
+//  Serial.println(enc_r);
+compass.read();
+heading = compass.heading();
+  if(compass.a.z > -13000){ // Safety mechanism to brake vehicle upon pick up
+    Input->velocity = 5;
   }
-//  while(Serial.available()){
-//    val = Serial.parseInt();
-//    robotControl();
-//    Drive();
-//  }
-//}
-
-//void robotControl(char userInput){
+  snprintf(report, sizeof(report), "A: %6d %6d %6d    M: %6d %6d %6d",
+    compass.a.x, compass.a.y, compass.a.z,
+    compass.m.x, compass.m.y, compass.m.z);
+   // Serial.println(heading);
+    delay(500);
+  }
 
 void robotControl(){
+  bonFire.velocity = Input->velocity;
 
-  switch(val){
+  switch(bonFire.velocity){
     case 1://'u': //Press the up arrow to start or go faster
           if(bonFire.changeSpeed == 0){
              bonFire.lMotor = 75;
              bonFire.rMotor = 75;
-             bonFire.changeSpeed++;
+             bonFire.changeSpeed = 1;;
             }
-          else{
-              bonFire.lMotor = bonFire.lMotor + 10;
-              bonFire.rMotor = bonFire.rMotor + 10;
-               bonFire.changeSpeed++;
-              }
           break;
     case 2://'d': //Press the down arrow stop or slow down
-          if(bonFire.changeSpeed == 0){
-             bonFire.lMotor = 0;
-             bonFire.rMotor = 0;
-          }
-          else{
-            bonFire.lMotor = bonFire.lMotor - 10;
-            bonFire.rMotor = bonFire.rMotor - 10;
-            bonFire.changeSpeed--;
+          if(bonFire.changeSpeed == 1){
+             bonFire.lMotor = 65;
+             bonFire.rMotor = 61;
+             bonFire.changeSpeed = 0;
           }
           break;
     case 3://'l': // Left arrow key veer left
-          bonFire.lMotor  -= 2;
-          bonFire.rMotor  += 2;
+          bonFire.lMotor  = 50;
+          bonFire.rMotor  = 65;
+          bonFire.rrMotor = 0;
+          bonFire.lrMotor = 0;
           break;
     case 4://'r': // right arrow veer right
-          bonFire.lMotor  += 2;
-          bonFire.rMotor  -= 2;
+          bonFire.lMotor  = 65;
+          bonFire.rMotor  = 50;
+          bonFire.rrMotor = 0;
+          bonFire.lrMotor = 0;
           break;
     case 5://'b': //braking
           bonFire.lMotor = 0;
           bonFire.rMotor = 0;
+          bonFire.rrMotor = 0;          
+          bonFire.lrMotor = 0;
+          bonFire.changeSpeed = 0;
+          break;
+    case 6: // going in reverse
+          bonFire.lMotor = 0;
+          bonFire.rMotor = 0;
+          bonFire.rrMotor = 75;
+          bonFire.lrMotor = 75;
+          bonFire.changeSpeed = 1;
+          break;
+    case 7: // turn left in reverse
+          bonFire.lMotor = 0;
+          bonFire.rMotor = 0;
+          bonFire.rrMotor = 65;
+          bonFire.lrMotor = 50;
+          break;
+    case 8: // turn right in reverse
+          bonFire.lMotor = 0;
+          bonFire.rMotor = 0;
+          bonFire.rrMotor = 50;
+          bonFire.lrMotor = 65;
+          break;
+    case 9: // Max speed Hyper Drive
+          if(bonFire.changeSpeed == 1){
+          bonFire.lMotor = 255;
+          bonFire.rMotor = 255;
+          bonFire.rrMotor = 0;
+          bonFire.lrMotor = 0;
+          }
+          break;
+    case 10:
+          while(compass.heading() < 2 || compass.heading() > 12){ // facing north
+            analogWrite(motorPinB1, 75);
+            compass.read();
+            compass.heading();
+            }
+            analogWrite(motorPinB1, 0);
+            break;
+    case 11:
+           while(compass.heading() < 85 || compass.heading() > 95){ // East
+            analogWrite(motorPinB1, 75);
+            compass.read();
+            compass.heading();
+            }
+            analogWrite(motorPinB1, 0);
+            break;
+    case 12:
+           while(compass.heading() < 175 || compass.heading() > 185){ // South
+            analogWrite(motorPinB1, 75);
+            compass.read();
+            compass.heading();
+            }
+            analogWrite(motorPinB1, 0);
+            break;
+    case 13:
+           while(compass.heading() < 265 || compass.heading() > 275){ // West
+            analogWrite(motorPinB1, 80);
+            compass.read();
+            compass.heading();
+            }
+            analogWrite(motorPinB1, 0);
+            break;
+    default:
+          bonFire.lMotor = 0;
+          bonFire.rMotor = 0;
+          bonFire.rrMotor = 0;
+          bonFire.lrMotor = 0;
           bonFire.changeSpeed = 0;
   }
 }
 
 void Drive(){
   analogWrite(motorPinA1, bonFire.rMotor); //Right Wheel Forward
-  analogWrite(motorPinA2, 0); //Right Wheel Backwards
+  analogWrite(motorPinA2, bonFire.rrMotor); //Right Wheel Backwards
   analogWrite(motorPinB1, bonFire.lMotor); //Left Wheel Forward
-  analogWrite(motorPinB2, 0); //Left Wheel Backward
+  analogWrite(motorPinB2, bonFire.lrMotor); //Left Wheel Backward
 }
 
 void countLeft(){
   enc_l++;
-}
-void countRight(){
-  enc_r++;
-}
-
-void TransR(){
-  double disrx = bonFire.len*sin(bonFire.phi);
-  double disry = bonFire.len*cos(bonFire.phi);
-
-  double rrot[4][4] = {{cos(bonFire.phi), -sin(bonFire.phi), 0, 0},
-                        {sin(bonFire.phi), cos(bonFire.phi), 0, 0},
-                        {0, 0, 1, 0},
-                        {0, 0, 0, 1}
-  };
-
-  double rPos[4][4] = {{1, 0, 0, disrx},
-                       {0, 1, 0, disry},
-                       {0, 0, 1, 0},
-                       {0, 0, 0, 1}
-  };
-
-  double transR[4][4];
-  MatrixMultiple(rrot, rPos, transR);
-  double tempTrans[4][4];
-  MatrixMultiple(Trans, transR, tempTrans);
-  Trans[4][4] = tempTrans[4][4];
-//  angle = acos(Trans[1][1]);
-//  xPos = Trans[1][4];
-//  yPos = Trans[2][4];
-}
-
-void TransL(){
-  double dislx = -bonFire.len*sin(-bonFire.phi);
-  double disly = -bonFire.len*cos(-bonFire.phi);
-
-  double lrot[4][4] = {{cos(-bonFire.phi), -sin(-bonFire.phi), 0, 0},
-                        {sin(-bonFire.phi), cos(-bonFire.phi), 0, 0},
-                        {0, 0, 1, 0},
-                        {0, 0, 0, 1}
-  };
-
-  double lPos[4][4] = {{1, 0, 0, dislx},
-                       {0, 1, 0, disly},
-                       {0, 0, 1, 0},
-                       {0, 0, 0, 1}
-  };
-
-  double transL[4][4];
-  MatrixMultiple(lrot, lPos, transL);
-  double tempTrans[4][4];
-  MatrixMultiple(Trans, transL, tempTrans);
-  Trans[4][4] = tempTrans[4][4];
-//  angle = acos(Trans[1][1]);
-//  xPos = Trans[1][4];
-//  yPos = Trans[2][4];
-}
-
-void MatrixMultiple(double mat1[4][4], double mat2[4][4], double res[4][4]){
-  int i, j, k;
+  
+double tempL[4][4];
+int i, j, k; 
   for(i = 0; i < 4; i++){
     for(j = 0; j < 4; j++){
-      res[i][j] = 0;
+      tempL[i][j] = 0;
       for(k = 0; k < 4; k++){
-        res[i][j] += mat1[i][k]*mat2[k][j];
+        tempL[i][j] += Trans[i][k]*TransL[k][j];
       }
     }
   }
+for(i = 0; i < 4; i++){
+  for(j = 0; j < 4; j++){
+    Trans[i][j]= tempL[i][j];
+   }
+  }
+ }
+
+void countRight(){
+  enc_r++;
+
+double tempR[4][4];
+int i, j, k;
+for(i = 0; i < 4; i++){
+    for(j = 0; j < 4; j++){
+      tempR[i][j] = 0;
+      for(k = 0; k < 4; k++){
+        tempR[i][j] += Trans[i][k]*TransR[k][j];
+      }
+    }
+  }
+
+for(i = 0; i < 4; i++){
+  for(j = 0; j < 4; j++){
+    Trans[i][j]= tempR[i][j];
+    }
+  }
 }
+
 
 void printWiFiStatus() {
   // print the SSID of the network you're attached to:
