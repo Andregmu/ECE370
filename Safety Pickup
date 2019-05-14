@@ -149,7 +149,7 @@ void loop() {
 
 compass.read();
 heading = compass.heading();
-  if(compass.a.z > -13000){ // Safety mechanism to brake vehicle upon pick up
+  if(compass.a.z > -13000){ // Safety mechanism to brake vehicle upon pick up <------***********
     Input->velocity = 5;
   }
   snprintf(report, sizeof(report), "A: %6d %6d %6d    M: %6d %6d %6d",
