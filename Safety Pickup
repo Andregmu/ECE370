@@ -1,0 +1,260 @@
+#include <SPI.h>
+#include <WiFi101.h>
+#include <WiFiUdp.h>
+#include <Wire.h>
+#include <LSM303.h>
+
+#define motorPinA1 5 //Motor A forward Dir
+#define motorPinA2 6 // Motor A reverse Dir
+#define motorPinB1 11 // Motor B forward Dir
+#define motorPinB2 10 // Motor B reverse Dir
+
+LSM303 compass;
+
+//************************************************Prototypes************************************
+void countLeft();
+void countRight();
+void robotControl();
+void Drive();
+void printWiFiStatus();
+void printMacAddress(byte mac[]);
+
+//******************************************************Setting up Server*************************************
+
+///////please enter your sensitive data in the Secret tab/arduino_secrets.h
+char ssid[] = "RoboNet";        // your network SSID (name)
+char pass[] = "";    // your network password (use for WPA, or use as key for WEP)
+int keyIndex = 0;                // your network key Index number (needed only for WEP)
+
+int status = WL_IDLE_STATUS;
+//WiFiServer server(80);
+
+unsigned int localPort = 5008;      // local port to listen on
+
+char packetBuffer[255]; //buffer to hold incoming packet
+char sendBuffer[255]; // buffer to hold out going packet
+char  ReplyBuffer[] = "acknowledged";       // a string to send back
+
+WiFiUDP Udp;
+//*****************************************************Int Pins*************************************
+
+const int enc_pinL = A5; // encoder pin L
+const int enc_pinR = A3; // encoder Pin R
+
+//**********************************************Odometry****************************************
+struct Robot{
+  int velocity;
+  float angle;
+  int rMotor;
+  int lMotor;
+  float phi;
+  float len;
+  int changeSpeed;
+  float dist;
+  int rrMotor;
+  int lrMotor;
+};
+
+struct Robot bonFire = {0, 0, 30, 35, 0.0103192, 112, 0, 1.155756, 0, 0};
+Robot *Input; // sperate struct pointer that takes input from raspi via UDP and sends it to bonFire struct
+
+struct RobotFeed{
+  double vel;
+  double vel2;
+  float head;
+};
+
+RobotFeed *InfoOut; // Output pointer to write back to pi
+
+float heading = 0;
+
+char report[80]; // for printing report back to serial console or raspi
+//********************************************************************VOID SETUP*******************************************************
+void setup() {
+ // Configure pins for Adafruit ATWINC1500 Feather
+  WiFi.setPins(8,7,4,2);
+  //Initialize serial and wait for port to open:
+  Serial.begin(9600);
+//  while (!Serial) {
+//    ; // wait for serial port to connect. Needed for native USB port only
+//  }
+
+  // check for the presence of the shield:
+  if (WiFi.status() == WL_NO_SHIELD) {
+    Serial.println("WiFi shield not present");
+    // don't continue
+    while (true);
+  }
+
+  // by default the local IP address of will be 192.168.1.1
+  // you can override it with the following:
+   WiFi.config(IPAddress(192, 168, 100, 10));
+
+  // print the network name (SSID);
+  Serial.print("Creating access point named: ");
+  Serial.println(ssid);
+
+  // Create open network. Change this line if you want to create an WEP network:
+  status = WiFi.beginAP(ssid);
+  if (status != WL_AP_LISTENING) {
+    Serial.println("Creating access point failed");
+    // don't continue
+    while (true);
+  }
+
+  // wait 10 seconds for connection:
+  delay(10000);
+
+  // start the web server on port 80
+ // server.begin();
+
+  // you're connected now, so print out the status
+  printWiFiStatus();
+Udp.begin(localPort);
+
+//********************************************************initial Setup*******************************
+  pinMode(enc_pinL, INPUT_PULLUP);
+  pinMode(enc_pinR, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(enc_pinL), countLeft, RISING);
+  attachInterrupt(digitalPinToInterrupt(enc_pinR), countRight, RISING);
+  Wire.begin();
+  compass.init();
+  compass.enableDefault();
+  compass.m_min = (LSM303::vector<int16_t>){-7455, -7237, -7585};
+  compass.m_max = (LSM303::vector<int16_t>){+7853, +7605, +9378};
+}
+//***********************************VOID LOOP*******************************************************
+
+void loop() {
+  // compare the previous status to the current status
+  if (status != WiFi.status()) {
+    // it has changed update the variable
+    status = WiFi.status();
+
+    if (status == WL_AP_CONNECTED) {
+      byte remoteMac[6];
+
+      // a device has connected to the AP
+      Serial.print("Device connected to AP, MAC address: ");
+      WiFi.APClientMacAddress(remoteMac);
+      printMacAddress(remoteMac);
+    } else {
+      // a device has disconnected from the AP, and we are back in listening mode
+      Serial.println("Device disconnected from AP");
+    }
+  }
+
+ robotControl();
+  Drive();
+
+compass.read();
+heading = compass.heading();
+  if(compass.a.z > -13000){ // Safety mechanism to brake vehicle upon pick up
+    Input->velocity = 5;
+  }
+  snprintf(report, sizeof(report), "A: %6d %6d %6d    M: %6d %6d %6d",
+    compass.a.x, compass.a.y, compass.a.z,
+    compass.m.x, compass.m.y, compass.m.z);
+   // Serial.println(heading);
+    delay(500);
+  }
+
+void robotControl(){
+  bonFire.velocity = Input->velocity;
+  //bonFire.changeSpeed = Input->angle;
+
+  switch(bonFire.velocity){
+    case 1://'u': //Press the up arrow to start or go faster
+          if(bonFire.changeSpeed == 0){
+             bonFire.lMotor = 85;
+             bonFire.rMotor = 85;
+             bonFire.changeSpeed = 1;
+      break;
+    case 2://'d': //Press the down arrow stop or slow down
+          if(bonFire.changeSpeed > 1){
+             bonFire.lMotor = 75;
+             bonFire.rMotor = 71;
+             bonFire.changeSpeed = 2;
+          }
+          else if(bonFire.changeSpeed == 0){
+            bonFire.lMotor = 0;
+            bonFire.rMotor = 0;
+            bonFire.rrMotor = 85;
+            bonFire.lrMotor = 85;
+            bonFire.changeSpeed == 2;
+          }
+          break;
+    case 3://'l': // Left arrow key veer left
+          bonFire.lMotor  = 65;
+          bonFire.rMotor  = 80;
+          bonFire.rrMotor = 0;
+          bonFire.lrMotor = 0;
+          break;
+    case 4://'r': // right arrow veer right
+          bonFire.lMotor  = 80;
+          bonFire.rMotor  = 65;
+          bonFire.rrMotor = 0;
+          bonFire.lrMotor = 0;
+          break;
+    case 5://'b': //braking
+          bonFire.lMotor = 0;
+          bonFire.rMotor = 0;
+          bonFire.rrMotor = 0;          
+          bonFire.lrMotor = 0;
+          bonFire.changeSpeed = 0;
+          break;
+    case 6: // going in reverse
+          bonFire.lMotor = 0;
+          bonFire.rMotor = 0;
+          bonFire.rrMotor = 85;
+          bonFire.lrMotor = 85;
+          bonFire.changeSpeed = 1;
+          break;
+    case 7: // turn left in reverse
+          bonFire.lMotor = 0;
+          bonFire.rMotor = 0;
+          bonFire.rrMotor = 65;
+          bonFire.lrMotor = 50;
+          break;
+    case 8: // turn right in reverse
+          bonFire.lMotor = 0;
+          bonFire.rMotor = 0;
+          bonFire.rrMotor = 50;
+          bonFire.lrMotor = 65;
+          break;
+}
+}
+
+void printWiFiStatus() {
+  // print the SSID of the network you're attached to:
+  Serial.print("SSID: ");
+  Serial.println(WiFi.SSID());
+
+  // print your WiFi shield's IP address:
+  IPAddress ip = WiFi.localIP();
+  Serial.print("IP Address: ");
+  Serial.println(ip);
+
+  // print the received signal strength:
+  long rssi = WiFi.RSSI();
+  Serial.print("signal strength (RSSI):");
+  Serial.print(rssi);
+  Serial.println(" dBm");
+  // print where to go in a browser:
+  Serial.print("To see this page in action, open a browser to http://");
+  Serial.println(ip);
+
+}
+
+void printMacAddress(byte mac[]) {
+  for (int i = 5; i >= 0; i--) {
+    if (mac[i] < 16) {
+      Serial.print("0");
+    }
+    Serial.print(mac[i], HEX);
+    if (i > 0) {
+      Serial.print(":");
+    }
+  }
+  Serial.println();
+}
